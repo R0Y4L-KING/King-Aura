@@ -169,7 +169,12 @@ async def send_to_target(text, timeout=30.0):
 
     response_event.clear()
     captured_msg = None
-    await user.send_message(TARGET_BOT, text)
+    # parse_mode=None here specifically: this is the user's raw typed
+    # command (e.g. "/bypass https://site.com/x?a=1&b=2") being relayed
+    # verbatim. The client's default HTML parse_mode (set above, needed for
+    # correctly rendering TARGET_BOT's *replies*) would otherwise treat
+    # "&"/"<"/">" in an arbitrary pasted link as HTML markup and corrupt it.
+    await user.send_message(TARGET_BOT, text, parse_mode=None)
     logger.info(f"Sent to TARGET bot: {text[:50]}")
 
     try:
