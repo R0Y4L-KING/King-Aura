@@ -158,6 +158,33 @@ def copy_buttons(msg):
 # ---------------------------------------------------------------------------
 async def send_to_target(text, timeout=30.0):
     """Send `text` to TARGET_BOT as the userbot, wait for its reply."""
+    return await _relay_to_target(
+        lambda: user.send_message(TARGET_BOT, text, parse_mode=None),
+        log_label=text[:50],
+        timeout=timeout,
+    )
+
+
+async def send_target_message(message, timeout=30.0):
+    """Forward `message` to TARGET_BOT as-is (preserving its entities), wait
+    for the reply.
+
+    Used instead of send_to_target() whenever the incoming message carries a
+    link whose display text differs from its URL (e.g. a hyperlinked
+    "Click Here to Get Auth Key" button forwarded in from elsewhere) or is
+    itself a forward. Extracting event.raw_text in that case only grabs the
+    visible label — the real URL lives in the message's entities, not its
+    text — so TARGET_BOT's own link-scanning (used by /bypass) finds
+    nothing. Forwarding the original message keeps those entities intact.
+    """
+    return await _relay_to_target(
+        lambda: user.forward_messages(TARGET_BOT, message),
+        log_label=(message.raw_text or "<media/link>")[:50],
+        timeout=timeout,
+    )
+
+
+async def _relay_to_target(send_coro_factory, log_label, timeout):
     global captured_msg, response_event
 
     @user.on(events.NewMessage(chats=TARGET_BOT))
@@ -169,13 +196,8 @@ async def send_to_target(text, timeout=30.0):
 
     response_event.clear()
     captured_msg = None
-    # parse_mode=None here specifically: this is the user's raw typed
-    # command (e.g. "/bypass https://site.com/x?a=1&b=2") being relayed
-    # verbatim. The client's default HTML parse_mode (set above, needed for
-    # correctly rendering TARGET_BOT's *replies*) would otherwise treat
-    # "&"/"<"/">" in an arbitrary pasted link as HTML markup and corrupt it.
-    await user.send_message(TARGET_BOT, text, parse_mode=None)
-    logger.info(f"Sent to TARGET bot: {text[:50]}")
+    await send_coro_factory()
+    logger.info(f"Sent to TARGET bot: {log_label}")
 
     try:
         await asyncio.wait_for(response_event.wait(), timeout=timeout)
@@ -241,36 +263,39 @@ async def forward_response(event, target_msg, status_msg=None):
 # ---------------------------------------------------------------------------
 # Handlers — every command the user sends is relayed as-is
 # ---------------------------------------------------------------------------
-@bot.on(events.NewMessage(func=lambda e: e.raw_text and e.raw_text.startswith("/")))
-async def command_handler(event):
-    text = event.raw_text.strip()
+# ---------------------------------------------------------------------------
+# Handlers — every message the user sends is relayed to TARGET_BOT
+# ---------------------------------------------------------------------------
+def _has_hidden_link(message):
+    """True if the message carries a link whose real URL isn't already
+    visible in its plain text — e.g. a hyperlinked "Click Here" button, or
+    any message the user forwarded in from elsewhere. Those need to go
+    through send_target_message() (a real forward) instead of
+    send_to_target() (which only sees the visible text) or the URL is lost.
+    """
+    if message.fwd_from:
+        return True
+    for ent in message.entities or []:
+        if type(ent).__name__ == "MessageEntityTextUrl":
+            return True
+    return False
+
+
+@bot.on(events.NewMessage(func=lambda e: bool(e.raw_text) or e.message.media))
+async def relay_handler(event):
+    message = event.message
+    text = (event.raw_text or "").strip()
     status = await event.reply("⏳ Processing...")
 
     try:
         async with request_lock:
-            target_response = await send_to_target(text, timeout=30.0)
+            if _has_hidden_link(message):
+                target_response = await send_target_message(message, timeout=30.0)
+            else:
+                target_response = await send_to_target(text, timeout=30.0)
             await forward_response(event, target_response, status)
     except Exception as e:
-        logger.error(f"Error in command handler: {e}")
-        try:
-            await status.delete()
-        except Exception:
-            pass
-        await event.reply("❌ Something went wrong. Try again.")
-
-
-@bot.on(events.NewMessage(func=lambda e: e.raw_text and not e.raw_text.startswith("/")))
-async def text_handler(event):
-    """Non-command text (e.g. a raw link for /bypass-style flows) — relay as-is."""
-    text = event.raw_text.strip()
-    status = await event.reply("⏳ Processing...")
-
-    try:
-        async with request_lock:
-            target_response = await send_to_target(text, timeout=30.0)
-            await forward_response(event, target_response, status)
-    except Exception as e:
-        logger.error(f"Error in text handler: {e}")
+        logger.error(f"Error in relay handler: {e}")
         try:
             await status.delete()
         except Exception:
