@@ -65,8 +65,24 @@ def run_flask():
 # ---------------------------------------------------------------------------
 # Telethon clients
 # ---------------------------------------------------------------------------
+# Python 3.14 removed asyncio's old auto-create-a-loop-if-none-exists
+# behavior, but Telethon (1.36) still expects one to exist the moment a
+# TelegramClient is constructed at module level (before main()/asyncio.run
+# ever runs). Without this, client construction itself crashes with
+# "RuntimeError: no running event loop". Explicitly making one here is the
+# standard fix for older Telethon versions on newer Python.
+_loop = asyncio.new_event_loop()
+asyncio.set_event_loop(_loop)
+
 bot = TelegramClient("bot_session", API_ID, API_HASH)
 user = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+# Default "Markdown" mode has no underline syntax, so a message that
+# combines bold + underline + a text link in one span (like AS AuraX's
+# "Click Here to Get Auth Key" button text) doesn't round-trip cleanly —
+# the link can silently vanish on resend. HTML mode represents all three
+# unambiguously (<b>, <u>, <a href>), so switch both clients to it.
+bot.parse_mode = "html"
+user.parse_mode = "html"
 
 captured_msg = None
 response_event = asyncio.Event()
